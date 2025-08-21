@@ -1,0 +1,41 @@
+# ------------------------------------------------------------
+# Workflow Name : CI
+# Trigger       : push / pull_request to main/master
+# Purpose       :
+#   - 変更に対して Lint / Build / Unit / Integration / E2E を実行
+#   - 共通WFを呼び出して一元管理
+# ------------------------------------------------------------
+
+# TODO: uv + ruffを想定したpythonプロジェクトの例です。実際のプロジェクトに合わせて変更してください。
+
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  quality-gates:
+    uses: ./.github/workflows/_reusable-quality-gates.yml
+    with:
+      python-version: "3.12"
+      run-integration: true
+      run-e2e: true
+      # 必要なら次の2行でテストコマンドを上書き
+      # integration-command: "pytest -v tests/integration"
+      # e2e-command: "pytest -v tests/e2e"
