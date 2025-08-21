@@ -1,0 +1,119 @@
+# ------------------------------------------------------------
+# Workflow Name : release-on-publish
+# Trigger       : GitHub Release が "published" になったとき
+# Purpose       :
+#   - 公開リリース契機で以下を実施
+#       1) build          : 本番ビルド & 成果物をアーティファクト化
+#       2) quality-gates  : Lint / Unit / Integration / E2E（再利用WF）
+#       3) publish        : 成果物を GitHub Release にアップロード
+#       4) release        : リリース本文の追記や最終処理
+# ------------------------------------------------------------
+
+# TODO: プロジェクトに合わせて変更してください
+
+name: release-on-publish
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write   # gh release upload / edit に必要
+
+concurrency:
+  group: release-on-publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+  DIST_NAME: dist
+  RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+jobs:
+  # ----------------------------------------------------------
+  # 1) build : 本番ビルド（sdist / wheel）→ アーティファクト化
+  # ----------------------------------------------------------
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Build package (uv build)
+        run: uv build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DIST_NAME }}
+          path: ${{ env.DIST_NAME }}/*
+
+  # ----------------------------------------------------------
+  # 2) quality-gates : 再利用ワークフロー呼び出し
+  # ----------------------------------------------------------
+  quality-gates:
+    name: Quality Gates
+    uses: ./.github/workflows/_reusable-quality-gates.yml
+    needs: [build]
+    with:
+      python-version: "3.12"
+      run-integration: true
+      run-e2e: true
+      # integration-command: "pytest -v tests/integration"
+      # e2e-command: "pytest -v tests/e2e"
+
+  # ----------------------------------------------------------
+  # 3) publish : Release へアセットを添付
+  # ----------------------------------------------------------
+  publish:
+    name: Publish (Upload Assets to Release)
+    runs-on: ubuntu-latest
+    needs: [quality-gates]
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.DIST_NAME }}
+          path: artifacts
+
+      - name: Upload artifacts to GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for file in artifacts/*; do
+            echo "Uploading: $file"
+            gh release upload "${{ env.RELEASE_TAG }}" "$file" --clobber
+          done
+
+  # ----------------------------------------------------------
+  # 4) release : リリース本文の追記や最終処理
+  # ----------------------------------------------------------
+  release:
+    name: Finalize Release
+    runs-on: ubuntu-latest
+    needs: [publish]
+    steps:
+      - name: Append artifact list to Release notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "### Assets" > _assets.md
+          echo "" >> _assets.md
+          for f in $(gh release view "${{ env.RELEASE_TAG }}" --json assets --jq '.assets[].name'); do
+            echo "- \`$f\`" >> _assets.md
+          done
+
+          body_current=$(gh release view "${{ env.RELEASE_TAG }}" --json body --jq .body)
+          echo -e "${body_current}\n\n$(cat _assets.md)" > _new_body.md
+          gh release edit "${{ env.RELEASE_TAG }}" --notes-file _new_body.md
